@@ -114,3 +114,8 @@ The core includes modifications from the RobGo fork (SCC and FM mixer, soft clip
 ## fMSX License
 
 fMSX cannot be distributed commercially (see the file headers in `src/fmsx`).
+
+
+## Thanks to
+People from Whatsapp ROBGO_RG Group - André Chaves, Evandro, fg1998, Cacá Couto, Roberto Guerra, Miguel Roberto
+
