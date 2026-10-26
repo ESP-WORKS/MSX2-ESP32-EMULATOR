@@ -1,0 +1,28 @@
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+.clang_complete
+.gcc-flags.json
+
+# VS Code
+.vscode/
+!.vscode/extensions.json
+
+# Python
+__pycache__/
+*.py[cod]
+
+# macOS
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# Build output
+*.bin
+*.elf
+*.map
+
+# Config do cartao SD: versionamos so o exemplo
+/bootl.rc

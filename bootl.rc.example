@@ -1,0 +1,43 @@
+# bootl.rc - copie para a raiz do cartao SD como "bootl.rc" e descomente o que precisar.
+# Uma chave por linha, no formato chave=valor. "#" e ";" comentam a linha inteira.
+# O arquivo e lido logo depois de o cartao montar. Sem cartao, sem arquivo, ou com
+# valor recusado, vale o padrao de src/board.h e a placa sobe igual.
+
+# ---- Pinos do PS/2 ------------------------------------------------------------
+# Padrao (LilyGO TTGO VGA32 / RobGo-RG): teclado em 32/33, mouse em 27/26.
+# DATA e CLK andam em par: declarar um sem o outro faz os quatro voltarem ao padrao.
+# Nao vale usar GPIO 34-39 aqui: eles so leem, e o PS/2 precisa escrever no pino.
+#kbddat=32
+#kbdclk=33
+#mousedat=27
+#mouseclk=26
+
+# Perfil invertido (teclado na porta do mouse). Declarando so o teclado na porta B,
+# o mouse assume a porta A sozinho, como no firmware antigo.
+#kbddat=27
+#kbdclk=26
+
+# ---- Botao de menu -----------------------------------------------------------
+# GPIO de um botao que abre o menu do fMSX, igual ao F10. Fecha para GND.
+# Em 34-39 (como o 36) nao existe pull-up interno: precisa de resistor externo.
+# Sem a chave, ou com magicb=-1, nenhum botao e usado.
+#magicb=36
+
+# ---- Emulador ----------------------------------------------------------------
+# Pasta raiz da BIOS. Os arquivos ficam na subpasta MSX2 dela: /msx/MSX2/MSX2.ROM
+#msx_biosdir=/msx
+
+# Cartucho e disquetes carregados ao ligar.
+#msx_rom=/msx/jogo.rom
+#msx_diska=/msx/disco.dsk
+#msx_diskb=/msx/disco2.dsk
+
+# Quadros nao desenhados: 0, 25, 50 ou 75. msx_autoskip ajusta sozinho.
+#msx_frameskip=50
+#msx_autoskip=1
+
+# Sintese FM (YM2413).
+#msx_fm=1
+
+# Contador de FPS no monitor serial.
+#msx_fps=1
