@@ -1,120 +1,116 @@
-# MSX2 para VGA32 (RobGo-RG)
+# MSX2 for VGA32 (RobGo-RG)
 
-Emulador MSX2 (fMSX 6.0 de Marat Fayzullin) rodando direto no ESP32-WROVER da TTGO VGA32 / RobGo-RG.
-Sem launcher, sem Retro-Go, sem ESP-IDF externo: um projeto PlatformIO normal (Arduino + FabGL).
+MSX2 emulator (fMSX 6.0 by Marat Fayzullin) running directly on the ESP32-WROVER in the TTGO VGA32 / RobGo-RG board.
 
-## Compilar
+No launcher, no Retro-Go, no external ESP-IDF: just a regular PlatformIO project (Arduino + FabGL).
 
-Abra a pasta no VS Code (extensão PlatformIO) e use **Build** e **Upload**. O `platformio.ini` já tem tudo.
+## Build
 
-A validação dos pinos do `bootl.rc` tem teste que roda no PC, sem placa:
+Open the folder in VS Code (with the PlatformIO extension) and use **Build** and **Upload**. The `platformio.ini` file already contains everything needed.
+
+The `bootl.rc` pin validation includes a test that runs on the PC without requiring the board:
 
     pio test -e native
 
-## Cartão SD
+## SD Card
 
-Formato FAT32. Coloque a BIOS na pasta `/MSX2` da raiz do cartão.
+FAT32 format. Place the BIOS files in the `/MSX2` directory at the root of the card.
 
-| Arquivo | Uso |
+| File | Purpose |
 |---|---|
-| `MSX2.ROM` (32 KB) | obrigatório |
-| `MSX2EXT.ROM` (16 KB) | obrigatório |
-| `DISK.ROM` | necessário para disquetes |
-| `MSXDOS2.ROM` | opcional (MSX-DOS 2) |
+| `MSX2.ROM` (32 KB) | Required |
+| `MSX2EXT.ROM` (16 KB) | Required |
+| `DISK.ROM` | Required for floppy disk support |
+| `MSXDOS2.ROM` | Optional (MSX-DOS 2) |
 
-A BIOS não vem no projeto. Os nomes precisam ser exatamente estes.
-ROMs, disquetes (`.dsk`) e estados (`.sta`) são escolhidos pelo menu do fMSX (F10).
+The BIOS files are not included in the project. Filenames must match exactly.
 
-## Teclas (teclado PS/2)
+ROMs, floppy disk images (`.dsk`), and save states (`.sta`) are selected through the fMSX menu (F10).
 
-| Tecla | Ação |
+## Keyboard Controls (PS/2 Keyboard)
+
+| Key | Action |
 |---|---|
-| F10 | menu do fMSX: abrir arquivo, salvar estado, modelo, discos, reset, reboot |
-| botão em `magicb` | igual ao F10, se configurado no `bootl.rc` |
-| F12 | reset do MSX |
-| F11 | alterna frame skip (0 / 25 / 50 / 75 %) |
-| F1–F5 | F1–F5 do MSX |
-| Setas + Espaço/Enter + Ctrl/Esc | também funcionam como joystick 1 |
-| Mouse PS/2 | mouse do MSX |
+| F10 | fMSX menu: open file, save state, select model, manage disks, reset, reboot |
+| `magicb` button | Same as F10, if configured in `bootl.rc` |
+| F12 | Reset the MSX |
+| F11 | Toggle frame skipping (0 / 25 / 50 / 75%) |
+| F1–F5 | MSX F1–F5 keys |
+| Arrow keys + Space/Enter + Ctrl/Esc | Also work as joystick 1 |
+| PS/2 mouse | MSX mouse |
 
-## /sd/bootl.rc (opcional)
+## Optional `/sd/bootl.rc`
 
-Arquivo de texto UTF-8, uma linha `chave=valor`; `#` e `;` comentam.
-Lido logo depois de o cartão montar. Há um modelo comentado em `bootl.rc.example`.
+UTF-8 text file with one `key=value` entry per line. `#` and `;` are used for comments.
 
-| Chave | Efeito |
+The file is read immediately after the SD card is mounted. A commented example is provided in `bootl.rc.example`.
+
+| Key | Effect |
 |---|---|
-| `kbddat=32`, `kbdclk=33` | GPIOs DATA e CLK do teclado PS/2 |
-| `mousedat=27`, `mouseclk=26` | GPIOs DATA e CLK do mouse PS/2 |
-| `magicb=36` | GPIO de um botão que abre o menu do fMSX (igual ao F10) |
-| `msx_biosdir=/msx` | raiz da BIOS; os arquivos ficam em `/msx/MSX2/` |
-| `msx_rom=/msx/jogo.rom` | cartucho carregado ao ligar |
-| `msx_diska=/msx/disco.dsk`, `msx_diskb=...` | disquetes carregados ao ligar |
-| `msx_frameskip=50` | quadros não desenhados: 0, 25, 50 ou 75 |
-| `msx_autoskip=1` | ajuste automático do frame skip |
-| `msx_fm=1` | síntese FM (YM2413) ligada/desligada |
-| `msx_fps=1` | contador de FPS no monitor serial |
+| `kbddat=32`, `kbdclk=33` | PS/2 keyboard DATA and CLK GPIOs |
+| `mousedat=27`, `mouseclk=26` | PS/2 mouse DATA and CLK GPIOs |
+| `magicb=36` | GPIO for a button that opens the fMSX menu (same as F10) |
+| `msx_biosdir=/msx` | BIOS root directory; files are stored in `/msx/MSX2/` |
+| `msx_rom=/msx/game.rom` | Cartridge ROM loaded at startup |
+| `msx_diska=/msx/disk.dsk`, `msx_diskb=...` | Floppy disks loaded at startup |
+| `msx_frameskip=50` | Frames skipped: 0, 25, 50, or 75 |
+| `msx_autoskip=1` | Enable automatic frame skip adjustment |
+| `msx_fm=1` | Enable/disable FM synthesis (YM2413) |
+| `msx_fps=1` | Display the FPS counter on the serial monitor |
 
-## Pinos
+## GPIO Pins
 
-Os padrões estão em `src/board.h`: VGA em 22/21/19/18/5/4 com HSync 23 e VSync 15,
-teclado PS/2 em 32/33, mouse PS/2 em 27/26, SD com CS 13, MOSI 12 e CLK 14,
-áudio no DAC interno GPIO25 (mono).
+Default pin assignments are defined in `src/board.h`: VGA on GPIOs 22/21/19/18/5/4, with HSync on GPIO23 and VSync on GPIO15; PS/2 keyboard on GPIOs 32/33; PS/2 mouse on GPIOs 27/26; SD card with CS on GPIO13, MOSI on GPIO12, and CLK on GPIO14; audio through the internal DAC on GPIO25 (mono).
 
-O MISO do SD é tentado em GPIO35 e depois em GPIO2, cada um a 20, 10 e 4 MHz; o
-primeiro que montar vale, e o serial mostra qual foi. Isso é fixo no firmware.
+The SD card MISO pin is tested first on GPIO35 and then on GPIO2, at 20, 10, and 4 MHz. The first configuration that successfully mounts the card is selected, and the serial monitor reports which one was chosen. This behavior is fixed in the firmware.
 
-Teclado, mouse e botão de menu, ao contrário, saem do `bootl.rc` e não precisam de
-recompilação — é assim que outras placas são atendidas. O PS/2 sobe antes do VGA:
-o reset do teclado não completa com a interrupção de vídeo já ligada. No serial,
-`teclado PS/2: respondeu ao reset` confirma que o cabo falou; `NAO respondeu` é
-falha de fio, de pino ou de teclado desligado. O firmware recusa um GPIO que:
+Unlike the SD configuration, the keyboard, mouse, and menu button pins are configured through `bootl.rc` and do not require recompilation. This is how support for other boards is implemented.
 
-- não exista neste ESP32 (os pads 20, 24, 28–31, 37 e 38 não saem do WROVER);
-- já pertença ao VGA, ao SD (incluindo o MISO que venceu o probe), ao áudio, à UART0,
-  à flash ou à PSRAM;
-- esteja repetido entre teclado e mouse;
-- seja de entrada apenas (34–39) num papel de PS/2, que precisa escrever no pino;
-- **não tenha função RTC**, num papel de PS/2. O driver PS/2 da FabGL roda no
-  coprocessador ULP e chega aos pinos por `rtc_gpio_desc[]`, então só funciona em
-  GPIO 0, 2, 4, 12–15, 25–27 e 32–39. Num pino sem RTC não há erro: o teclado
-  simplesmente fica mudo.
+PS/2 is initialized before VGA because the keyboard reset handshake cannot complete once the video interrupt is running.
 
-Em qualquer recusa o motivo vai para o serial e valem os padrões, então um `bootl.rc`
-errado não deixa a placa inutilizável.
+On the serial monitor, `teclado PS/2: respondeu ao reset` (“PS/2 keyboard: responded to reset”) confirms that the keyboard communicated successfully. `NAO respondeu` (“NO response”) indicates a wiring issue, an incorrect pin assignment, or a disconnected keyboard.
 
-No boot o firmware imprime o que foi decidido, com a origem de cada valor:
+The firmware rejects any GPIO that:
+
+- Does not physically exist on this ESP32 (pads 20, 24, 28–31, 37, and 38 are not exposed on the WROVER).
+- Is already assigned to VGA, the SD card (including the MISO pin selected by the probe), audio, UART0, flash, or PSRAM.
+- Is duplicated between the keyboard and mouse.
+- Is input-only (GPIOs 34–39) when used for PS/2, which requires driving the pin.
+- **Does not support RTC functions** when used for PS/2. The FabGL PS/2 driver runs on the ULP coprocessor and accesses pins through `rtc_gpio_desc[]`, so it only works on GPIOs 0, 2, 4, 12–15, 25–27, and 32–39. Using a pin without RTC support does not produce an error; the keyboard simply remains unresponsive.
+
+Whenever a configuration is rejected, the reason is printed to the serial monitor and the default settings are used. This ensures that an invalid `bootl.rc` file will not render the board unusable.
+
+At startup, the firmware prints the selected configuration and the source of each setting:
 
     ===== MSX2 VGA32 (build Oct  3 2026 00:31:12) =====
     SD ok: MISO=GPIO2, 20000 kHz
-    ---- pinos ----
-    bootl.rc: /sd/bootl.rc lido
-    teclado PS/2: DATA=GPIO27 CLK=GPIO26 (bootl.rc)
-    mouse PS/2:   DATA=GPIO32 CLK=GPIO33 (padrao, cedeu a porta ao teclado)
-    botao de menu: GPIO36 (bootl.rc), ativo em LOW, precisa de pull-up externo
-    cartao SD: CS=GPIO13 MOSI=GPIO12 CLK=GPIO14 MISO=GPIO2
+    ---- pins ----
+    bootl.rc: /sd/bootl.rc loaded
+    PS/2 keyboard: DATA=GPIO27 CLK=GPIO26 (bootl.rc)
+    PS/2 mouse:   DATA=GPIO32 CLK=GPIO33 (default, reassigned to the keyboard)
+    menu button: GPIO36 (bootl.rc), active LOW, requires an external pull-up
+    SD card: CS=GPIO13 MOSI=GPIO12 CLK=GPIO14 MISO=GPIO2
     ---------------
 
-## Estrutura
+## Project Structure
 
+```text
+src/main.cpp        setup(): SD, video, keyboard, audio; emulator runs on core 0
+src/msx_glue.c      C glue layer between fMSX and the hardware (video, keyboard, audio, frame skipping)
+src/hal.h           C <-> hardware interface
+src/hal_pins.cpp    PS/2 and menu button pins from bootl.rc, with validation
+src/hal_*.cpp       SD/bootl.rc, VGA (FabGL), PS/2 (FabGL), audio (I2S/DAC)
+test/test_pins/     Pin validation tests (pio test -e native)
+src/fmsx/           fMSX core (EMULib, fMSX, Z80) + msxfix.c/h (ESP32 working directory support)
 ```
-src/main.cpp        setup(): SD, vídeo, teclado, áudio; emulador no núcleo 0
-src/msx_glue.c      cola em C entre o fMSX e o hardware (vídeo, teclas, áudio, frame skip)
-src/hal.h           fronteira C <-> hardware
-src/hal_pins.cpp    pinos de PS/2 e botão de menu vindos do bootl.rc, com validação
-src/hal_*.cpp       SD/bootl.rc, VGA (FabGL), PS/2 (FabGL), áudio (I2S/DAC)
-test/test_pins/     testes da validação de pinos (pio test -e native)
-src/fmsx/           núcleo fMSX (EMULib, fMSX, Z80) + msxfix.c/h (cwd no ESP32)
-```
 
-O núcleo tem as alterações do fork robgo (mixer com SCC e FM, soft-clip, Z80 na IRAM, menu enxuto,
-navegação de pastas), marcadas com `RG_TARGET_ROBGO_RG`.
+The core includes modifications from the RobGo fork (SCC and FM mixer, soft clipping, Z80 code in IRAM, streamlined menu, and directory navigation), marked with `RG_TARGET_ROBGO_RG`.
 
-## Se algo falhar
+## Troubleshooting
 
-- **Linker reclama de `iram0_0_seg`**: em `platformio.ini`, troque `-DMSX_Z80_IN_IRAM=1` por `0`.
-- **Tela azul com mensagem**: SD ausente ou BIOS não encontrada. O monitor serial (115200) mostra os detalhes.
+- **Linker error mentioning `iram0_0_seg`:** In `platformio.ini`, change `-DMSX_Z80_IN_IRAM=1` to `0`.
+- **Blue screen with an error message:** The SD card is missing or the BIOS could not be found. Check the serial monitor at 115200 baud for details.
 
-## Licença do fMSX
+## fMSX License
 
-O fMSX não pode ser distribuído comercialmente (ver cabeçalhos dos arquivos em `src/fmsx`).
+fMSX cannot be distributed commercially (see the file headers in `src/fmsx`).
