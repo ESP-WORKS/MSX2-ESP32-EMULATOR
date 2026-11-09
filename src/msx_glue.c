@@ -38,6 +38,9 @@ static uint16_t *XBuf;
 #endif
 
 void PutImage(void);   // usado pelo RefreshScreen() do Common.h
+/* v1.06b: anel de scanlines em RAM interna (ver hal_linering.cpp). */
+static int MSXLineRingOn = 0;
+static int LineRingWanted = 0;   /* v1.08: opt-in (msx_linering=1); ver RELEASE_V1_08 */
 
 #include "fmsx.h"
 
@@ -79,7 +82,7 @@ static void msx_br_update_apostrophe_vram(int br_on)
 // O quadro descartado continua executando Z80/VDP/som; apenas nao desenha.
 // ---------------------------------------------------------------------------
 static int FrameSkip = 0;           // % efetiva descartada; 0 no modo manual
-static int FrameSkipAuto = 0;       // modo selecionado por Shift+F11/bootl.rc
+static int FrameSkipAuto = 1;       // v1.02: AUTO por padrao; Shift+F11 / bootl.rc alteram
 static MSXAutoFrameSkip AutoSkipState;
 static int VideoAsync = 1;        // pipeline VGA permanente
 static int VideoAsyncReady = 0;
@@ -90,6 +93,21 @@ static volatile uint32_t stat_vga_us, stat_sound_us, stat_pacing_us;
 // Contadores lidos pela tarefa de diagnóstico e pelo OSD de FPS (desde o boot).
 static volatile unsigned stat_emu_frames, stat_drawn_frames;
 static volatile const char *stat_where = "boot";
+/* v1.06: F12 reinicia com a abertura MSX2+ (reset frio de F4h).
+ * msx_f12_logo=0 no bootl.rc volta ao reset quente (BASIC direto). */
+static int F12ShowsLogo = 1;
+/* v1.06: tempo bloqueado na fila de audio tambem e folga (ociosidade)
+ * para o Frame Skip AUTO; ver hal_audio_block_us(). */
+static uint32_t AudioBlockLastUs;
+/* v1.08: servo de taxa do audio. O limitador de EPS roda a 60,000 Hz e o
+ * relogio do MSX a 59,92 Hz (NTSC) / 50,16 Hz (PAL). Cada quadro gera 400
+ * amostras (24 kHz / 60) em vez de 400,5; a fila de audio e mantida perto de
+ * 70% por um ajuste fino (no maximo +-0,5% / +1,5% na partida) no numero de
+ * amostras por bloco de 8 linhas. Assim o audio nunca trava o emulador. */
+#define AUDIO_SCALE_NTSC_Q16 65452u   /* 16666,667 / 16688,155 us */
+#define AUDIO_SCALE_PAL_Q16  65744u   /* 20000,000 / 19936,612 us */
+#define AUDIO_TARGET_FILL    70
+static int AudioBiasUnits;            /* 1/125 de amostra por bloco */
 
 static void set_runtime_frame_skip_auto(int auto_enabled)
 {
@@ -181,6 +199,7 @@ int ProcessEvents(int Wait)
 
     if (!InMenu) {
         if (rising & HAL_HOT_RESET) {
+            if (F12ShowsLogo) MSXColdResetStatus();
             ResetMSX(Mode, RAMPages, VRAMPages);
             return 0;
         }
@@ -196,6 +215,7 @@ int ProcessEvents(int Wait)
         // Menu do próprio fMSX: carrega cartucho/disco, salva estado, opções...
         InMenu = 1;
         stat_where = "menu";
+        if (MSXLineRingOn) hal_lr_flush();   // menu desenha direto no framebuffer
         MenuMSX();
         wait_nav_release(500);
         PrevNav = hal_input_nav();
@@ -258,8 +278,23 @@ void Keyboard(void)
         hal_video_pace_emu_frame();
         if (ProfileOn || FrameSkipAuto) {
             const uint32_t elapsed = (uint32_t)(hal_time_us() - t);
-            if (ProfileOn) stat_pacing_us += elapsed;
-            update_auto_frame_skip(elapsed);
+            /* v1.06: quando a fila de audio enche, o emulador espera dentro
+             * de WriteAudio() e o limitador de EPS fica com espera ~0.
+             * Ate a v1.05 essa espera nao contava como folga: depois de um
+             * trecho pesado o AUTO subia o descarte e nunca mais descia
+             * (FPS preso em 56-58 mesmo com sobra de CPU). */
+            const uint32_t audio_now = hal_audio_block_us();
+            const uint32_t audio_wait = audio_now - AudioBlockLastUs;
+            AudioBlockLastUs = audio_now;
+            if (ProfileOn) stat_pacing_us += elapsed + audio_wait;
+            update_auto_frame_skip(elapsed + audio_wait);
+        }
+        {
+            /* Servo do audio, uma vez por quadro. */
+            const int fill = (int)(hal_audio_queued_bytes() * 100u /
+                                   (HAL_AUDIO_STREAM_SAMPLES * 2u));
+            int bias = (AUDIO_TARGET_FILL - fill) * 8 / 20;
+            AudioBiasUnits = bias > 24 ? 24 : bias < -8 ? -8 : bias;
         }
     }
     stat_where = "run";
@@ -331,6 +366,10 @@ int InitMachine(void)
     // Renderizador fMSX continua usando XBuf; nada no VDP e alterado.
     if (VideoAsync && !VideoAsyncReady)
         VideoAsyncReady = hal_video_async_init(WIDTH * HEIGHT * sizeof(*FrameBuf));
+#if MSX_NATIVE_RGB222
+    if (LineRingWanted && !MSXLineRingOn)
+        MSXLineRingOn = hal_lr_init();
+#endif
 
     for (int J = 0; J < 80; J++)
         SetColor(J, 0, 0, 0);
@@ -390,6 +429,7 @@ void PutImage(void)
     ++stat_drawn_frames;
     stat_where = "video";
     int64_t t = ProfileOn ? hal_time_us() : 0;
+    if (MSXLineRingOn) hal_lr_flush();   // todas as linhas na PSRAM antes da VGA
     if (VideoAsyncReady) {
         // A VGA le exclusivamente o quadro CONCLUIDO. O emulador recebe outro
         // framebuffer antes de continuar o proximo frame. Em caso de fila
@@ -422,6 +462,7 @@ void PutImage(void)
 
 int ShowVideo(void)
 {
+    if (MSXLineRingOn) hal_lr_flush();
 #if MSX_NATIVE_RGB222
     hal_video_present_safe_rgb222(FrameBuf, WIDTH, HEIGHT, WIDTH);
 #else
@@ -463,7 +504,13 @@ void PlayAllSound(int uSec)
      * bloco de 8 scanlines. Conserva EXATAMENTE as amostras e o backlog.
      * Nos casos comuns a divisao por 125 usa apenas aritmetica de 32 bits. */
     static uint64_t fraction125;
-    fraction125 += (uint64_t)(unsigned int)uSec * 3u;
+    {
+        const uint32_t scale = VIDEO(MSX_PAL) ? AUDIO_SCALE_PAL_Q16 : AUDIO_SCALE_NTSC_Q16;
+        int64_t f = (int64_t)fraction125 +
+                    (int64_t)(((uint64_t)(unsigned int)uSec * 3u * scale) >> 16) +
+                    (int64_t)AudioBiasUnits;
+        fraction125 = f < 0 ? 0u : (uint64_t)f;
+    }
     unsigned int samples;
     if (fraction125 <= UINT32_MAX) {
         const uint32_t accum = (uint32_t)fraction125;
@@ -530,7 +577,7 @@ static void absolute_sd_path(char *dst, size_t n, const char *value)
 
 static int select_bios_folder(void)
 {
-    // Nova estrutura padrao do cartao FAT32: /MSX 2+ FAST/ROMS/
+    // Estrutura padrao do cartao FAT32: /MSX2/ROMS/
     static const char *candidates[] = {
         "/sd/MSX2/ROMS", "/sd/MSX2/roms",
     };
@@ -553,6 +600,8 @@ void msx_run(void)
 {
     char value[160];
 
+    /* AUTO e o padrao desde a v1.02. Respeitar configuracoes antigas,
+       mas uma escolha explicita de msx_autoskip tem prioridade. */
     if (hal_rc_get("msx_frameskip", value, sizeof(value))) {
         const int v = atoi(value);
         if (!strcmp(value, "auto") || !strcmp(value, "AUTO"))
@@ -562,6 +611,10 @@ void msx_run(void)
             hal_log("msx_frameskip=%d legado; substituido por AUTO\n", v);
         } else FrameSkipAuto = 0;
     }
+    if (hal_rc_get("msx_autoskip", value, sizeof(value)))
+        FrameSkipAuto = atoi(value) != 0;
+    hal_log("Frame Skip inicial: %s (Shift+F11 alterna)\n",
+            FrameSkipAuto ? "AUTO" : "0%");
     if (hal_rc_get("msx_fbram", value, sizeof(value)))
         FbInternal = atoi(value) != 0;
     if (hal_rc_get("msx_turbo", value, sizeof(value)))
@@ -599,6 +652,41 @@ void msx_run(void)
     hal_log("SCC/SCC+ audio inicial=%s (menu F10)\n", SCCEnabled ? "ON" : "OFF");
     hal_log("MSX video interno: %s; VGA: RGB222 64 cores\n",
             MSX_NATIVE_RGB222 ? "RGB222 8bpp (v30)" : "RGB565 16bpp (v29)");
+    /* v39: porta F4h do MSX2+ (tela de abertura). Auto por padrao;
+       msx_f4_inverted=1 forca a logica Panasonic, =0 a logica normal. */
+    if (hal_rc_get("msx_f4_inverted", value, sizeof(value)) && value[0])
+        MSXSetF4Mode(atoi(value) != 0);
+    /* v1.03: apenas durante a abertura MSX2+, nenhum custo nos jogos.
+       Para teste A/B: msx_boot_sprite_scanline=0 usa o comportamento v1.02. */
+    int boot_sprite_scanline = 1;
+    if (hal_rc_get("msx_boot_sprite_scanline", value, sizeof(value)))
+        boot_sprite_scanline = atoi(value) != 0;
+    /* v1.06: a rolagem da v1.04 lia a pagina errada com SP2 (R#2=3Fh +
+       32 KiB = pagina 2) e repetia a imagem no lugar da cor de fundo de
+       R#27. Corrigida e ligada por padrao: e ela que "constroi" o logo.
+       msx_v9958_screen6_scroll=0 desliga para comparacao. */
+    int v9958_scroll = 1;   /* v1.06: ON (paginas SP2 / R#27 corrigidos) */
+    if (hal_rc_get("msx_v9958_screen6_scroll", value, sizeof(value)))
+        v9958_scroll = atoi(value) != 0;
+    /* Somente boot MSX2+, nao modifica jogos, mappers nem o VDP. */
+    int boot_guides_cleanup = 1;
+    if (hal_rc_get("msx_boot_guides_cleanup", value, sizeof(value)))
+        boot_guides_cleanup = atoi(value) != 0;
+    MSXSetBootGuideCleanup(boot_guides_cleanup);
+    hal_log("MSX2+ boot: limpeza visual dos sprites-guia %s\n",
+            boot_guides_cleanup ? "ON" : "OFF");
+    MSXSetScreen6HScroll(v9958_scroll);
+    hal_log("MSX2+ V9958: SCREEN6 horizontal scroll %s\n", v9958_scroll ? "ON" : "OFF");
+    MSXSetBootSpriteScanline(boot_sprite_scanline);
+    hal_log("MSX2+ boot: colisao de sprites por scanline %s (somente abertura)\n",
+            boot_sprite_scanline ? "ON" : "OFF");
+    if (hal_rc_get("msx_linering", value, sizeof(value)))
+        LineRingWanted = atoi(value) != 0;
+    if (hal_rc_get("msx_hotram", value, sizeof(value)))
+        MSXSetHotRAM(atoi(value) != 0);
+    if (hal_rc_get("msx_f12_logo", value, sizeof(value)))
+        F12ShowsLogo = atoi(value) != 0;
+    hal_log("F12: %s\n", F12ShowsLogo ? "reset frio (abertura MSX2+)" : "reset quente (BASIC direto)");
     if (hal_rc_get("msx_fm", value, sizeof(value)))
         SetFMEnabled(atoi(value) != 0);
     // A porcentagem efetiva do modo AUTO sera calculada em execucao.
@@ -610,7 +698,7 @@ void msx_run(void)
 
     if (!select_bios_folder()) {
         hal_screen_message("MSX2+ BIOS not found",
-                           "Copy MSX2P.ROM and MSX2PEXT.ROM to /MSXX2/ROMS/");
+                           "Copy MSX2P.ROM and MSX2PEXT.ROM to /MSX2/ROMS/");
         hal_log("BIOS MSX2+: MSX2P.ROM or MSX2PEXT.ROM not found in %s\n", BiosDir);
         return;
     }
@@ -648,6 +736,7 @@ void msx_run(void)
     hal_video_set_system_hz(60u);
     hal_log("fMSX start: NTSC 60 Hz inicial\n");
     stat_where = "start";
+    hal_log_heap("antes do fMSX");
     int rc = fmsx_main(argc, (char **)argv);
     hal_log("fMSX ended (%d)\n", rc);
     if (rc) {

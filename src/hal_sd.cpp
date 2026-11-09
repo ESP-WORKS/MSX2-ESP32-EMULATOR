@@ -84,6 +84,36 @@ void *hal_alloc_rom(size_t size)
     return p;
 }
 
+void hal_log_heap(const char *tag)
+{
+    hal_log("HEAP %s: interna livre=%uKiB maior bloco=%uKiB | PSRAM livre=%uKiB\n", tag,
+            (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024),
+            (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024),
+            (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
+}
+
+/* v1.06b: segmento de 16 KiB da RAM do MSX na RAM interna. So aloca se,
+ * depois dele, ainda couberem o cache MegaROM minimo (64 KiB) e a reserva
+ * de 48 KiB usada por hal_alloc_rom_cache. Falha = segmento fica na PSRAM. */
+void *hal_alloc_hot_segment(size_t size)
+{
+    const uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+    const size_t keep = (64 + 48) * 1024;
+    const size_t free_bytes = heap_caps_get_free_size(caps);
+    const size_t largest = heap_caps_get_largest_free_block(caps);
+    if (size && free_bytes >= size + keep && largest >= size) {
+        void *p = heap_caps_malloc(size, caps);
+        if (p) {
+            hal_log("RAM MSX: segmento %u KiB na RAM interna (livre=%uKiB)\n",
+                    (unsigned)(size / 1024), (unsigned)(free_bytes / 1024));
+            return p;
+        }
+    }
+    hal_log("RAM MSX: segmento na PSRAM (livre interna=%uKiB)\n",
+            (unsigned)(free_bytes / 1024));
+    return nullptr;
+}
+
 /* Cache de bancos MegaROM: somente DRAM, nenhuma alocacao em PSRAM.
  * Reserva 48 KiB para pilhas, FabGL, teclado e outras estruturas. */
 void *hal_alloc_rom_cache(size_t size)

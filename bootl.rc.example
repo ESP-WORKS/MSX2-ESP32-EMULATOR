@@ -24,20 +24,44 @@
 #magicb=36
 
 # ---- Emulador ----------------------------------------------------------------
-# Pasta raiz da BIOS. Os arquivos ficam na subpasta MSX2 dela: /msx/MSX2/MSX2.ROM
-#msx_biosdir=/msx
+# Diretorio que contem as BIOS no SD (padrao: /MSX2/ROMS).
+#msx_biosdir=/MSX2/ROMS
 
 # Cartucho e disquetes carregados ao ligar.
 #msx_rom=/msx/jogo.rom
 #msx_diska=/msx/disco.dsk
 #msx_diskb=/msx/disco2.dsk
 
-# Quadros nao desenhados: 0, 25, 50 ou 75. msx_autoskip ajusta sozinho.
-#msx_frameskip=50
-#msx_autoskip=1
+# Auto Frame Skip comeca LIGADO (AUTO) na v1.02. Shift+F11 alterna AUTO / 0%.
+# Para iniciar desligado, descomente: 
+#msx_autoskip=0
+# Chave antiga msx_frameskip=0 tambem desliga; msx_autoskip tem prioridade.
+#msx_frameskip=0
 
 # Sintese FM (YM2413).
 #msx_fm=1
 
 # Contador de FPS no monitor serial.
 #msx_fps=1
+
+# MSX2+: tela de abertura real exige MSX2PKANJI.ROM (32768 bytes) em /MSX2/ROMS.
+# Nao confundir com KANJI.ROM (fontes, 131072 bytes).
+# MSX2+ porta F4h: auto detecta fabricantes; se a ROM usar outra polaridade:
+# 1 = Panasonic/Sanyo (invertida), 0 = Sony/normal.
+#msx_f4_inverted=0
+
+# ---- v1.03: temporizacao das colisoes de sprites no logo original MSX2+ --
+# Padrao 1 (ON): acompanha colisao por linha e a cada leitura de S#0.
+# Atua apenas durante SCREEN 6 na abertura e nao custa FPS nos jogos.
+# Se o logo continuar com problemas, compare com a v1.02 desativando:
+#msx_boot_sprite_scanline=0
+
+# ---- v1.04: rolagem horizontal V9958 na SCREEN6 do MSX2+ ----
+# Desativada por padrao na v1.05: a v1.04 trouxe glitches graficos.
+# Para repetir o experimento da v1.04 (apenas diagnostico):
+# msx_v9958_screen6_scroll=1
+
+# ---- v1.05: fim dos sprites-guia da abertura MSX2+ ----
+# Ativado por padrao. A ROM real sinaliza fim por R#25=00 e R#2=1F.
+# So para comparacao com v1.03: deixar as duas barras sem limpeza visual.
+# msx_boot_guides_cleanup=0

@@ -1,6 +1,7 @@
 // hal_audio.cpp - áudio mono 16 bits -> DAC interno do ESP32 (GPIO25) via I2S0
 #include <Arduino.h>
 #include "driver/i2s.h"
+#include "esp_timer.h"
 #include "freertos/stream_buffer.h"
 #include "hal.h"
 #include "freertos/FreeRTOS.h"
@@ -12,6 +13,9 @@
 static StreamBufferHandle_t pcm;
 static int16_t pending[BLOCK];
 static unsigned pending_count;
+static volatile uint32_t audio_block_us;   // v1.06: espera acumulada (fila cheia)
+
+extern "C" uint32_t hal_audio_block_us(void) { return audio_block_us; }
 
 // MSX keyboard click state. The real machine does NOT generate a 1.8 kHz
 // square-wave tone. PPI port C bit 7 is a 1-bit DAC: every transition produces
@@ -157,7 +161,15 @@ extern "C" void hal_audio_write(const int16_t *samples, unsigned count)
         samples += n;
         count -= n;
         if (pending_count == BLOCK) {
-            xStreamBufferSend(pcm, pending, sizeof(pending), portMAX_DELAY);
+            /* v1.06: mede somente a espera real (fila cheia). Esse tempo e
+             * folga do nucleo do emulador e entra no calculo do AUTO. */
+            if (xStreamBufferSpacesAvailable(pcm) < sizeof(pending)) {
+                const int64_t t0 = esp_timer_get_time();
+                xStreamBufferSend(pcm, pending, sizeof(pending), portMAX_DELAY);
+                audio_block_us += (uint32_t)(esp_timer_get_time() - t0);
+            } else {
+                xStreamBufferSend(pcm, pending, sizeof(pending), portMAX_DELAY);
+            }
             pending_count = 0;
         }
     }

@@ -18,6 +18,8 @@ void    *hal_alloc_fast(size_t size);          // RAM interna (mais rápida) se 
 void    *hal_alloc_hot(size_t size);
 void     hal_set_fast_bios(int enabled);          // msx_fastbios=0 desliga a preferencia por DRAM
 void    *hal_alloc_system_rom(size_t size); // BIOS MSX2+ preferencialmente RAM interna, sem sacrificar cartuchos
+void     hal_log_heap(const char *tag);       // v1.08: RAM interna/PSRAM livres no serial
+void    *hal_alloc_hot_segment(size_t size); // v1.06b: RAM interna so com folga para o cache MegaROM
 void    *hal_alloc_rom_cache(size_t size);   // banco LRU 64/128 KiB: apenas RAM interna
 void    *hal_alloc_rom(size_t size);           // ROM pequena: tenta RAM interna antes da PSRAM           // memória crítica do emulador: prioriza RAM interna
 void     hal_screen_message(const char *l1, const char *l2);   // texto de erro na tela
@@ -72,12 +74,12 @@ void     hal_video_toggle_fps(void);
 // Atualiza o contador de quadros do emulador para o OSD FPS/EPS.
 void     hal_video_set_emu_frames(uint32_t frames);
 int      hal_video_fps_enabled(void);
-// No OSD Shift+F12: FPS, EPS e porcentagem efetiva do frame skip AUTO.
+// No OSD F11: FPS, EPS e porcentagem efetiva do frame skip AUTO.
 // auto_mode=0 (0% fixo), auto_mode=1 (0..65% dinamico).
 void     hal_video_set_frameskip_state(int auto_mode, int percent);
 // Mostra temporariamente FRAME SKIP 0% ou FRAME SKIP AUTO (-1) se FPS estiver OFF.
 void     hal_video_show_frameskip(int percent);
-// Atalhos de vídeo (Shift+F11 reservado, Shift+F12 = OSD FPS).
+// Atalhos de video: F11 = OSD FPS/EPS; Shift+F11 = Frame Skip.
 int      hal_video_hotkey(int fkey, int shift);
 
 // ---- Entrada (teclado/mouse PS/2) ---------------------------------------
@@ -110,6 +112,13 @@ void     hal_audio_init(void);
 unsigned hal_audio_free(void);                 // amostras que cabem sem bloquear
 unsigned hal_audio_queued_bytes(void);
 void     hal_audio_write(const int16_t *samples, unsigned count);  // bloqueia se cheio
+uint32_t hal_audio_block_us(void);
+// v1.06b: anel de scanlines (RAM interna, nucleo 0) -> framebuffer PSRAM (nucleo 1)
+int      hal_lr_init(void);
+int      hal_lr_enabled(void);
+uint8_t *hal_lr_acquire(uint8_t *dst);
+void     hal_lr_flush(void);
+uint32_t hal_lr_full_waits(void);             // v1.06: us acumulados bloqueado em hal_audio_write
 // Click mecânico/eletrônico da tecla MSX (transição do bit SOUND da PPI).
 void     hal_audio_keyclick(void);
 void     hal_audio_keyclick_edge(int rising);

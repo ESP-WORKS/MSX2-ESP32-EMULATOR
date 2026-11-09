@@ -30,7 +30,7 @@ void setup()
     disableCore0WDT();               // o emulador ocupa o núcleo 0 quase o tempo todo
     disableLoopWDT();
     Serial.begin(115200);
-    hal_log("\nMSX2+ FAST VGA32 v38.5 | 512 KiB RAM | NTSC 60 Hz | MegaROM LRU\n");
+    hal_log("\nMSX2+ FAST VGA32 v1.08 | 512 KiB RAM | NTSC 60 Hz | MegaROM LRU+promo | F4h boot\n");
 
        // Apaga a otadata para o bootloader voltar a partir da primeira partição de app.
     const esp_partition_t *otadata = esp_partition_find_first(
@@ -43,7 +43,7 @@ void setup()
     hal_video_init();
     if (!sd_ok) {
         hal_screen_message("Cartao SD nao encontrado",
-                           "Use FAT32 com MSX2P.ROM e MSX2PEXT.ROM em /MSX 2+ FAST/ROMS/");
+                           "Use FAT32 com MSX2P.ROM e MSX2PEXT.ROM em /MSX2/ROMS/");
         return;
     }
     char v[8];
@@ -148,6 +148,11 @@ void loop()
         const int64_t cpu_vdp_io = dt > used ? dt - used : 0;
         hal_log("PROFILE CORE0 residual CPU+VDP+IO~= %u ms/s\n",
                 (unsigned)(cpu_vdp_io / 1000));
+        static uint32_t last_lr_waits = 0;
+        const uint32_t lr_waits = hal_lr_full_waits();
+        hal_log("PROFILE line ring: %s, esperas por anel cheio=%u/s\n",
+                hal_lr_enabled() ? "ON" : "OFF", (unsigned)(lr_waits - last_lr_waits));
+        last_lr_waits = lr_waits;
         last_vga = vga;
         last_sound = sound;
         last_pacing = pacing;

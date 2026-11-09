@@ -17,6 +17,8 @@
 #include "MSX.h"
 #ifdef MSX_ESP32
 #include "hal.h"
+#include "MSXBootSpriteCollision.h"
+#include "MSXBootGuideCleanup.h"
 #endif
 #include "Sound.h"
 #include "Floppy.h"
@@ -90,6 +92,28 @@ static int MSX1BiosLoaded = -1;
 static unsigned BootVideoFrames = 0;
 static byte BootKeyClickConfigured = 0;
 static byte BootVDPDisplaySeen = 0;
+/* v1.03: bit 5 de S#0 precisa refletir colisoes durante a animacao MSX2+.
+ * O fMSX original executa CheckSprites() apenas na linha 192, enquanto a
+ * rotina de abertura original (MSX2PKANJI.ROM, 7A68h) le S#0 duas vezes
+ * seguidas para sincronizar o movimento. Desligado apos o boot: FPS intacto. */
+/* SCREEN6 512-dot horizontal scroll with 256-pixel VGA sampling.
+ * Zero registers use the unchanged high-performance original renderer. */
+int MSXScreen6HScrollEnabled=1; /* v1.06: ON (paginas SP2 corrigidas) */
+void MSXSetScreen6HScroll(int Enabled) { MSXScreen6HScrollEnabled=Enabled!=0; }
+
+static byte MSXBootSpriteScanlineEnabled=1;
+/* v1.05: somente os sprites-guia da abertura, sem mexer no status de colisoes. */
+#ifdef MSX_ESP32
+static int MSXBootGuideCleanupEnabled=1;
+static MSXBootGuideState MSXBootGuideStateCurrent;
+void MSXSetBootGuideCleanup(int Enabled) { MSXBootGuideCleanupEnabled=Enabled!=0; }
+#endif
+
+void MSXSetBootSpriteScanline(int Enabled)
+{
+  MSXBootSpriteScanlineEnabled=Enabled!=0;
+}
+
 /* MSX2+: vetor de abertura na Sub-ROM (0002h) pode chamar o codigo
  * de boot na ROM Kanji BASIC (0x4000-0xBFFF do slot expandido 3-1).
  * O arquivo opcional contem APENAS o driver/boot, nao KANJI.ROM (fonte).
@@ -97,7 +121,60 @@ static byte BootVDPDisplaySeen = 0;
 static byte *MSX2POpeningROM = 0;
 static byte *MSXDiskROM = 0;
 static byte MSXDiskSubSlot = 1;
-static byte MSX2PResetF4 = 0xFF; /* Panasonic: F4h invertido */
+/* v39: porta F4h (registrador de status de reset do MSX2+).
+ * A BIOS do MSX2+ le F4h no boot; com o bit 7 indicando "reset quente"
+ * ela pula a tela de abertura e vai direto ao BASIC. Ate a v38 a porta
+ * so existia com MSX2PKANJI.ROM presente; sem ela a leitura devolvia
+ * NORAM (0xFF) e as BIOS de logica normal (Sony, Sanyo...) nunca
+ * mostravam o logo. Agora a porta e sempre emulada no modo MSX2+:
+ *   logica normal  : power-on 00h, escrita mantem bits 7 e 5
+ *   logica invertida (Panasonic): power-on FFh, escrita = valor|7Fh
+ * (mesmo comportamento do MSXResetStatusRegister do openMSX).
+ * O valor persiste no reset por F12, como no hardware real: o logo
+ * aparece ao ligar e e pulado em resets subsequentes. */
+static byte MSX2PResetF4 = 0x00;
+static byte MSX2PF4Inverted = 0;
+static int  MSX2PF4Override = -1; /* -1 auto, 0 normal, 1 invertida */
+
+void MSXSetF4Mode(int Mode) { MSX2PF4Override=(Mode<0)? -1:(Mode? 1:0); }
+
+extern byte *MemMap[4][4][8];
+static int MSX2PBiosHasText(const char *Text)
+{
+  const byte *Areas[2]; int Sizes[2],A,I,J,N=(int)strlen(Text);
+  Areas[0]=MemMap[0][0][0]; Sizes[0]=0x8000;
+  Areas[1]=MemMap[3][1][0]; Sizes[1]=0x4000;
+  for(A=0;A<2;++A)
+  {
+    if(!Areas[A] || Areas[A]==EmptyRAM) continue;
+    for(I=0;I+N<=Sizes[A];++I)
+    {
+      for(J=0;J<N && Areas[A][I+J]==(byte)Text[J];++J);
+      if(J==N) return(1);
+    }
+  }
+  return(0);
+}
+
+/* Chamado no power-on e na troca de modelo. */
+static void MSX2PF4PowerOn(void)
+{
+  if(MSX2PF4Override>=0) MSX2PF4Inverted=(byte)MSX2PF4Override;
+  /* A existencia de Kanji BASIC nao indica a polaridade de F4h.
+     Panasonic e Sanyo usam logica invertida; Sony e outros, normal.
+     Quem usar BIOS sem identificacao pode forcar via bootl.rc. */
+  else MSX2PF4Inverted=MSX2PBiosHasText("Panasonic") ||
+                       MSX2PBiosHasText("PANASONIC") ||
+                       MSX2PBiosHasText("National") ||
+                       MSX2PBiosHasText("NATIONAL") ||
+                       MSX2PBiosHasText("Sanyo") ||
+                       MSX2PBiosHasText("SANYO");
+  MSX2PResetF4=MSX2PF4Inverted? 0xFF:0x00;
+  if(Verbose) printf("MSX2+: porta F4h logica %s (%s), power-on=%02Xh\n",
+                     MSX2PF4Inverted? "invertida":"normal",
+                     MSX2PF4Override>=0? "bootl.rc":"auto",MSX2PResetF4);
+}
+
 
 byte *MemMap[4][4][8];   /* Memory maps [PPage][SPage][Addr] */
 static void MapMSX2POpeningAndDisk(void)
@@ -136,6 +213,23 @@ static void MapMSX2POpeningAndDisk(void)
 
 
 byte *RAMData;                     /* RAM Mapper contents    */
+/* v1.06b: segmentos "quentes" do mapper na RAM interna do ESP32.
+ * A BIOS MSX2/2+ mapeia o segmento 0 em C000h (pilha, variaveis do
+ * sistema e da maioria dos jogos) e o segmento 1 em 8000h. Com eles fora
+ * da PSRAM, PUSH/POP/CALL/RET e variaveis deixam de disputar o cache de
+ * memoria externa com os bancos MegaROM e a VRAM. Os demais segmentos
+ * continuam em RAMData (PSRAM). msx_hotram=0 desliga. */
+#define RAM_HOT_SEGS 2
+static byte *RAMHot[RAM_HOT_SEGS];
+static int RAMHotWanted=0;   /* v1.08: opt-in (msx_hotram=1) */
+void MSXSetHotRAM(int Enabled) { RAMHotWanted=Enabled!=0; }
+byte *MSXRAMSeg(int Seg)
+{
+#ifdef MSX_ESP32
+  if(Seg<RAM_HOT_SEGS && RAMHot[Seg]) return(RAMHot[Seg]);
+#endif
+  return(RAMData+((int)Seg<<14));
+}
 byte RAMMapper[4];                 /* RAM Mapper state       */
 byte RAMMask;                      /* RAM Mapper mask        */
 
@@ -236,7 +330,7 @@ SCC  SCChip;                       /* SCC registers & state  */
  * Canais 3..7: desativar so a sintese de som SCC/SCC+. */
 int SCCEnabled = 0;
 /* Inicializacao OFF: teclado internacional legado ate selecionar F10. */
-int MSXKeyboardBR = 0;
+int MSXKeyboardBR = 1; /* v1.02: ABNT2 ativo por padrao; F10 permite OFF */
 void SetSCCEnabled(int Enabled)
 {
   int I;
@@ -473,6 +567,8 @@ static unsigned long RomCacheClock;
  * Evita varrer as 16 tags em cada mudanca de mapper (Metal Gear 2).
  * Nunca e consultada no fetch normal do Z80. */
 static unsigned char RomCacheByBank[MAXSLOTS][256];
+/* Ultima amostra por janela (RomCachePromote, uma vez por quadro). */
+static struct { int Cart; unsigned Bank; } RomCacheSample[4]={{-1,0},{-1,0},{-1,0},{-1,0}};
 static volatile unsigned RomCacheHits,RomCacheMisses,RomCacheCopies,RomCacheEvictions;
 
 void MSXSetRomCacheKiB(int KiB)
@@ -510,6 +606,7 @@ static void RomCacheInvalidate(void)
   memset(RomCacheEntry,0,sizeof(RomCacheEntry));
   memset(RomCacheByBank,0xFF,sizeof(RomCacheByBank));
   RomCacheClock=0;
+  for(I=0;I<4;++I) RomCacheSample[I].Cart=-1;
 }
 
 /* DRAM only: failure is safe, PSRAM cache would waste time. First try the
@@ -537,112 +634,132 @@ static void RomCacheStart(void)
           RomCacheEntries,Size/1024u);
 }
 
-static void RomCacheSync(void)
+/* Identifica o banco de 8 KiB de MegaROM visivel na janela K (4000h-BFFFh).
+ * Retorna 1 e preenche Cart/Bank quando o banco pode ser cacheado. */
+static int RomCacheWindow(int K,byte **Source,int *Cart,unsigned *Bank)
 {
-  /* Only 4000h-BFFFh: the MegaROM mapper windows. CPU memory reads remain
-   * single-indirection and cannot be slowed by hash lookups. */
-  struct CacheWanted { byte *Source; int Cart; unsigned Bank; int Entry; } Wanted[4];
-  unsigned char Pinned[ROM_CACHE_MAX_ENTRIES]={0};
-  int K,I,Slot,Found,Victim;
-  unsigned B,Size;
+  int I=K+2,Slot;
+  unsigned Size;
   uintptr_t Address,Start,Offset;
-  unsigned long Old;
+  *Source=MemMap[PSL[I>>1]][SSL[I>>1]][I];
+  *Cart=-1;
+  *Bank=0;
+  Slot=CartMap[PSL[I>>1]][SSL[I>>1]];
+  if(Slot<0 || Slot>=MAXSLOTS || !ROMData[Slot] || ROMMask[Slot]<8 ||
+     EnWrite[I>>1])
+    return(0);
+  Start=(uintptr_t)ROMData[Slot];
+  Address=(uintptr_t)*Source;
+  Size=((unsigned)ROMMask[Slot]+1u)*ROM_CACHE_BANK_BYTES;
+  if(Address<Start) return(0);
+  Offset=Address-Start;
+  if(Offset>Size-ROM_CACHE_BANK_BYTES || (Offset&0x1FFFu)) return(0);
+  *Cart=Slot;
+  *Bank=(unsigned)(Offset>>13);
+  return(1);
+}
+
+static inline int RomCacheResident(int Cart,unsigned Bank)
+{
+  unsigned B=RomCacheByBank[Cart][Bank];
+  return(B<RomCacheEntries && RomCacheEntry[B].Valid &&
+         RomCacheEntry[B].Cart==Cart && RomCacheEntry[B].Bank==Bank)? (int)B:-1;
+}
+
+/* v39: a troca de banco NUNCA copia. Ate a v38 cada miss copiava 8 KiB
+ * da PSRAM para a DRAM no meio da execucao do Z80 (centenas de us por
+ * miss). Em MegaROMs maiores que o cache (Metal Gear 2, 512 KiB) ou com
+ * o pool reduzido a 64 KiB, as trocas de banco da rotina de interrupcao
+ * causavam varias copias por quadro e a oscilacao de 53-59 EPS.
+ * Agora: banco residente -> ponteiro da DRAM; ausente -> leitura direta
+ * da PSRAM (mesmos bytes). A promocao para a DRAM fica em
+ * RomCachePromote(), uma vez por quadro e com orcamento fixo. */
+MSX_HOT static void RomCacheSync(void)
+{
+  byte *Source;
+  int K,Cart,Found;
+  unsigned Bank;
 
   if(!RomCacheArea || !RomCacheEntries) return;
   for(K=0;K<4;++K)
   {
-    I=K+2;
-    Wanted[K].Source=MemMap[PSL[I>>1]][SSL[I>>1]][I];
-    Wanted[K].Cart=-1;
-    Wanted[K].Bank=0;
-    Wanted[K].Entry=-1;
-    Slot=CartMap[PSL[I>>1]][SSL[I>>1]];
-    if(Slot>=0 && Slot<MAXSLOTS && ROMData[Slot] && ROMMask[Slot]>=8 &&
-       !EnWrite[I>>1])
-    {
-      Start=(uintptr_t)ROMData[Slot];
-      Address=(uintptr_t)Wanted[K].Source;
-      Size=((unsigned)ROMMask[Slot]+1u)*ROM_CACHE_BANK_BYTES;
-      if(Address>=Start)
-      {
-        Offset=Address-Start;
-        if(Offset<=Size-ROM_CACHE_BANK_BYTES && !(Offset&0x1FFFu))
-        {
-          Wanted[K].Cart=Slot;
-          Wanted[K].Bank=(unsigned)(Offset>>13);
-        }
-      }
-    }
-  }
-  /* Pass 1: protect every resident bank still required by any CPU window.
-   * Crucially, do this before selecting victims for misses. */
-  for(K=0;K<4;++K)
-  {
-    if(Wanted[K].Cart<0) continue;
-    B=RomCacheByBank[Wanted[K].Cart][Wanted[K].Bank];
-    if(B<RomCacheEntries && RomCacheEntry[B].Valid &&
-       RomCacheEntry[B].Cart==Wanted[K].Cart &&
-       RomCacheEntry[B].Bank==Wanted[K].Bank)
-    {
-      Wanted[K].Entry=(int)B;
-      Pinned[B]=1;
-    }
-  }
-  /* Pass 2: copy only on a miss. The same ROM bank can appear more than once
-   * and uses the same cache entry. No entry reserved by pass 1 is evicted. */
-  for(K=0;K<4;++K)
-  {
-    if(Wanted[K].Cart<0) { RAM[K+2]=Wanted[K].Source;continue; }
-    Found=Wanted[K].Entry;
-    if(Found<0)
-    {
-      /* A duplicate of an earlier miss can share its newly filled bank. */
-      B=RomCacheByBank[Wanted[K].Cart][Wanted[K].Bank];
-      if(B<RomCacheEntries && RomCacheEntry[B].Valid &&
-         RomCacheEntry[B].Cart==Wanted[K].Cart &&
-         RomCacheEntry[B].Bank==Wanted[K].Bank)
-        Found=(int)B;
-    }
-    if(Found<0)
-    {
-      Victim=-1;
-      Old=~0UL;
-      for(B=0;B<RomCacheEntries;++B)
-      {
-        if(Pinned[B]) continue;
-        if(!RomCacheEntry[B].Valid) { Victim=(int)B;break; }
-        if(Victim<0 || RomCacheEntry[B].Tick<Old)
-        { Victim=(int)B;Old=RomCacheEntry[B].Tick; }
-      }
-      if(Victim>=0)
-      {
-        if(RomCacheEntry[Victim].Valid)
-        {
-          ++RomCacheEvictions;
-          RomCacheByBank[RomCacheEntry[Victim].Cart]
-                        [RomCacheEntry[Victim].Bank]=0xFF;
-        }
-        memcpy(RomCacheArea+(unsigned)Victim*ROM_CACHE_BANK_BYTES,
-               Wanted[K].Source,ROM_CACHE_BANK_BYTES);
-        RomCacheEntry[Victim].Cart=Wanted[K].Cart;
-        RomCacheEntry[Victim].Bank=Wanted[K].Bank;
-        RomCacheEntry[Victim].Valid=1;
-        RomCacheByBank[Wanted[K].Cart][Wanted[K].Bank]=(unsigned char)Victim;
-        ++RomCacheMisses;
-        ++RomCacheCopies;
-        Found=Victim;
-      }
-    }
-    else if(RAM[K+2]!=RomCacheArea+(unsigned)Found*ROM_CACHE_BANK_BYTES)
-      ++RomCacheHits;
-
+    if(!RomCacheWindow(K,&Source,&Cart,&Bank)) { RAM[K+2]=Source;continue; }
+    Found=RomCacheResident(Cart,Bank);
     if(Found>=0)
     {
-      Pinned[Found]=1;
-      RomCacheEntry[Found].Tick=++RomCacheClock;
-      RAM[K+2]=RomCacheArea+(unsigned)Found*ROM_CACHE_BANK_BYTES;
+      byte *P=RomCacheArea+(unsigned)Found*ROM_CACHE_BANK_BYTES;
+      if(RAM[K+2]!=P) { ++RomCacheHits;RomCacheEntry[Found].Tick=++RomCacheClock; }
+      RAM[K+2]=P;
     }
-    else RAM[K+2]=Wanted[K].Source;
+    else
+    {
+      if(RAM[K+2]!=Source) ++RomCacheMisses;
+      RAM[K+2]=Source;
+    }
+  }
+}
+
+/* Uma vez por quadro (linha 192): promove para a DRAM no maximo
+ * ROM_CACHE_PROMOTE_PER_FRAME banco(s) que continuam mapeados na mesma
+ * janela desde a amostra do quadro anterior. Bancos trocados de forma
+ * transitoria (musica/dados na interrupcao) seguem lidos da PSRAM e nao
+ * expulsam os bancos de codigo. O custo maximo por quadro e limitado. */
+#define ROM_CACHE_PROMOTE_PER_FRAME 1
+
+static void RomCachePromote(void)
+{
+  unsigned char Pinned[ROM_CACHE_MAX_ENTRIES]={0};
+  byte *Source[4];
+  int Cart[4],K,J,Victim,Budget=ROM_CACHE_PROMOTE_PER_FRAME;
+  unsigned Bank[4],B;
+  unsigned long Old;
+
+  if(!RomCacheArea || !RomCacheEntries) return;
+  /* Entradas em uso por qualquer janela nao podem ser expulsas. */
+  for(K=0;K<4;++K)
+  {
+    if(!RomCacheWindow(K,&Source[K],&Cart[K],&Bank[K])) Cart[K]=-1;
+    if(RAM[K+2]>=RomCacheArea &&
+       RAM[K+2]<RomCacheArea+RomCacheEntries*ROM_CACHE_BANK_BYTES)
+      Pinned[(unsigned)(RAM[K+2]-RomCacheArea)/ROM_CACHE_BANK_BYTES]=1;
+  }
+  for(K=0;K<4;++K)
+  {
+    const int Stable=Cart[K]>=0 && RomCacheSample[K].Cart==Cart[K] &&
+                     RomCacheSample[K].Bank==Bank[K];
+    RomCacheSample[K].Cart=Cart[K];
+    RomCacheSample[K].Bank=Bank[K];
+    if(!Stable || !Budget || RAM[K+2]!=Source[K]) continue;
+    if(RomCacheResident(Cart[K],Bank[K])>=0) continue;
+    Victim=-1;
+    Old=~0UL;
+    for(B=0;B<RomCacheEntries;++B)
+    {
+      if(Pinned[B]) continue;
+      if(!RomCacheEntry[B].Valid) { Victim=(int)B;break; }
+      if(Victim<0 || RomCacheEntry[B].Tick<Old)
+      { Victim=(int)B;Old=RomCacheEntry[B].Tick; }
+    }
+    if(Victim<0) return;
+    if(RomCacheEntry[Victim].Valid)
+    {
+      ++RomCacheEvictions;
+      RomCacheByBank[RomCacheEntry[Victim].Cart][RomCacheEntry[Victim].Bank]=0xFF;
+    }
+    memcpy(RomCacheArea+(unsigned)Victim*ROM_CACHE_BANK_BYTES,Source[K],
+           ROM_CACHE_BANK_BYTES);
+    RomCacheEntry[Victim].Cart=Cart[K];
+    RomCacheEntry[Victim].Bank=Bank[K];
+    RomCacheEntry[Victim].Valid=1;
+    RomCacheEntry[Victim].Tick=++RomCacheClock;
+    RomCacheByBank[Cart[K]][Bank[K]]=(unsigned char)Victim;
+    Pinned[Victim]=1;
+    ++RomCacheCopies;
+    --Budget;
+    /* Todas as janelas que mostram este banco passam a ler da DRAM. */
+    for(J=0;J<4;++J)
+      if(Cart[J]==Cart[K] && Bank[J]==Bank[K] && RAM[J+2]==Source[J])
+        RAM[J+2]=RomCacheArea+(unsigned)Victim*ROM_CACHE_BANK_BYTES;
   }
 }
 #else
@@ -650,6 +767,7 @@ static void RomCacheSync(void)
 #define RomCacheInvalidate() ((void)0)
 #define RomCacheStart() ((void)0)
 #define RomCacheSync() ((void)0)
+#define RomCachePromote() ((void)0)
 #endif
 
 /** GetMemory() **********************************************/
@@ -1043,7 +1161,7 @@ void TrashMSX(void)
   MSX2POpeningROM=0;
   MSXDiskROM=0;
   MSXDiskSubSlot=1;
-  MSX2PResetF4=0xFF;
+  MSX2PResetF4=0x00;
 }
 
 /* F10: seleciona variante MSX1 de forma transacional. A variante somente
@@ -1075,6 +1193,18 @@ int SelectMSX1Bios(int Variant)
   if(MODEL(MSX_MSX1) && MSX1BiosLoaded==Variant) return(1);
   MSX1BiosVariant=Previous;
   return(0);
+}
+
+/* v1.06: F12 = reset "frio" do MSX2+. Restaura F4h ao valor de power-on
+ * (mesma polaridade ja detectada), para que a BIOS execute de novo a
+ * abertura animada, como ao ligar o aparelho. Chamar ANTES de ResetMSX().
+ * Fora do MSX2+ nao faz nada. msx_f12_logo=0 no bootl.rc preserva o
+ * reset quente das versoes anteriores (BASIC direto). */
+void MSXColdResetStatus(void)
+{
+  if(!MODEL(MSX_MSX2P)) return;
+  MSX2PResetF4=MSX2PF4Inverted? 0xFF:0x00;
+  if(Verbose) printf("MSX2+: reset frio (F12), F4h=%02Xh, abertura sera exibida\n",MSX2PResetF4);
 }
 
 /** ResetMSX() ***********************************************/
@@ -1239,7 +1369,22 @@ int ResetMSX(int NewMode,int NewRAMPages,int NewVRAMPages)
      * Uma ROM ausente nao muda o layout anterior de DISK.ROM e RAM. */
     if((NewMode&MSX_MODEL)==MSX_MSX2P)
     {
-      byte *Candidate=LoadROM("MSX2PKANJI.ROM",0x8000,0);
+      /* A animacao original vive no Kanji BASIC de 32 KiB, nao no
+         KANJI.ROM de fontes. Nao criar um logo artificial no framebuffer. */
+      long OpeningFileSize=-1;
+      int OpeningFileFound=0;
+      FILE *OpeningFile=fopen("MSX2PKANJI.ROM","rb");
+      if(OpeningFile)
+      {
+        OpeningFileFound=1;
+        if(!fseek(OpeningFile,0,SEEK_END)) OpeningFileSize=ftell(OpeningFile);
+        fclose(OpeningFile);
+      }
+      /* Se o SD nao permitir consultar o tamanho, preservar o leitor
+         anterior: LoadROM valida ao menos a leitura dos 32768 bytes. */
+      byte *Candidate=(OpeningFileFound &&
+          (OpeningFileSize<0 || OpeningFileSize==0x8000))?
+          LoadROM("MSX2PKANJI.ROM",0x8000,0):0;
       /* Vetor reservado da Sub-ROM: preservar bytes, nunca injetar JP
          ficticio nem substituir a BIOS da pessoa. */
       if(Candidate && MemMap[3][1][0] != EmptyRAM &&
@@ -1249,14 +1394,22 @@ int ResetMSX(int NewMode,int NewRAMPages,int NewVRAMPages)
       {
         FreeMemory(MSX2POpeningROM);
         MSX2POpeningROM=Candidate;
-        if(Verbose) printf("MSX2+: Kanji BASIC/Opening ROM no slot 3-1 (4000-BFFF)\n");
+        if(Verbose) printf("MSX2+ BOOT: MSX2PKANJI.ROM 32768 bytes carregada; abertura original disponivel no slot 3-1\n");
       }
       else
       {
         FreeMemory(Candidate);
         FreeMemory(MSX2POpeningROM);
         MSX2POpeningROM=0;
-        if(Verbose) printf("MSX2+: sem abertura Kanji BASIC valida; boot original preservado\n");
+        if(Verbose)
+        {
+          if(!OpeningFileFound)
+            printf("MSX2+ BOOT: falta MSX2PKANJI.ROM (32768 bytes) em ROMS; BIOS inicia diretamente no BASIC\n");
+          else if(OpeningFileSize>=0 && OpeningFileSize!=0x8000)
+            printf("MSX2+ BOOT: MSX2PKANJI.ROM com %ld bytes (esperado 32768); ignorada\n",OpeningFileSize);
+          else
+            printf("MSX2+ BOOT: ROM presente mas invalida/nao carregada; conferir MSX2PEXT.ROM e compatibilidade das ROMs\n");
+        }
       }
     }
     else
@@ -1265,7 +1418,7 @@ int ResetMSX(int NewMode,int NewRAMPages,int NewVRAMPages)
       MSX2POpeningROM=0;
     }
     MapMSX2POpeningAndDisk();
-    MSX2PResetF4=0xFF;
+    if((NewMode&MSX_MODEL)==MSX_MSX2P) MSX2PF4PowerOn();
 
     /* Change to the working directory */
     if(WorkDir && chdir(WorkDir))
@@ -1376,6 +1529,16 @@ int ResetMSX(int NewMode,int NewRAMPages,int NewVRAMPages)
       RAMPages = NewRAMPages;
       RAMMask  = NewRAMPages-1;
       RAMData  = P1;
+#ifdef MSX_ESP32
+      /* Alocados uma unica vez e preservando folga para o cache MegaROM. */
+      for(J=0;J<RAM_HOT_SEGS && J<NewRAMPages;++J)
+      {
+        if(!RAMHot[J] && RAMHotWanted) RAMHot[J]=(byte *)hal_alloc_hot_segment(0x4000);
+        if(RAMHot[J]) memset(RAMHot[J],NORAM,0x4000);
+      }
+      if(Verbose) printf("RAM: segmentos internos %s%s (msx_hotram)\n",
+                         RAMHot[0]? "0":"-",RAMHot[1]? " 1":" -");
+#endif
     }
     PRINTRESULT(P1);
   }
@@ -1403,7 +1566,7 @@ int ResetMSX(int NewMode,int NewRAMPages,int NewVRAMPages)
     PSL[J]              = 0;
     SSL[J]              = 0;
     /* RAMMap=3:2:1:0 */
-    MemMap[3][2][J*2]   = RAMData+(3-J)*0x4000;
+    MemMap[3][2][J*2]   = MSXRAMSeg(3-J);
     MemMap[3][2][J*2+1] = MemMap[3][2][J*2]+0x2000;
     RAMMapper[J]        = 3-J;
     /* Setting address space */
@@ -1454,6 +1617,9 @@ int ResetMSX(int NewMode,int NewRAMPages,int NewVRAMPages)
 
   /* Reset VDP */
   BootVideoFrames=0;
+#ifdef MSX_ESP32
+  MSXBootGuideReset(&MSXBootGuideStateCurrent);
+#endif
   BootKeyClickConfigured=0;
   BootVDPDisplaySeen=0;
   memcpy(VDP,VDPInit,sizeof(VDP));
@@ -1561,7 +1727,7 @@ byte RdZ80(word A)
 /** Z80 emulation calls this function to write byte V to    **/
 /** address A of Z80 address space.                         **/
 /*************************************************************/
-void WrZ80(word A,byte V)
+MSX_HOT void WrZ80(word A,byte V)
 {
   /* Secondary slot selector */
   if(A==0xFFFF) { SSlot(V);return; }
@@ -1605,11 +1771,86 @@ void WrZ80(word A,byte V)
 byte RobGoRdZ80Slow(word A) { return RdZ80(A); }
 void RobGoWrZ80Slow(word A,byte V) { WrZ80(A,V); }
 
+/* Guard for the short opening phase: no extra sprite work in games/BASIC. */
+#ifdef MSX_ESP32
+static int MSXBootCollisionEligible(void)
+{
+  /* v1.06: BootVideoFrames primeiro (fora do boot sai na 1a comparacao).
+   * Sem exigir slots vazios: a abertura tambem roda com cartucho inserido
+   * (power-on ou F12) e precisa do mesmo sincronismo por colisao. */
+  return BootVideoFrames<=900 && ScrMode==6 && MSXBootSpriteScanlineEnabled &&
+         MSX2POpeningROM && MODEL(MSX_MSX2P) && !SpritesOFF;
+}
+/* The sprite drawing suppression is evaluated only in SCREEN6 during the
+ * real opening ROM. ColorSprites() still runs normally so status S#0 and
+ * the frame-timing collision signal remain untouched. */
+int MSXBootGuidesShouldHide(void)
+{
+  return MSXBootGuideStateCurrent.hide_guides && BootVideoFrames<=900 &&
+         ScrMode==6 && MSXBootGuideCleanupEnabled &&
+         MSX2POpeningROM && MODEL(MSX_MSX2P);
+}
+static void MSXBootObserveGuideRegisters(byte Reg,byte Value)
+{
+  /* Assim que a BIOS sai da SCREEN6 para o BASIC, desarmar o latch.
+   * Uma aplicacao que entre novamente na SCREEN6 nao deve perder sprites. */
+  if(ScrMode!=6 && MSXBootGuideStateCurrent.hide_guides)
+    MSXBootGuideReset(&MSXBootGuideStateCurrent);
+  if((Reg==25 || Reg==2) && BootVideoFrames<=900 && ScrMode==6 &&
+     MSXBootGuideCleanupEnabled && MSX2POpeningROM && MODEL(MSX_MSX2P))
+  {
+    if(MSXBootGuideObserve(&MSXBootGuideStateCurrent,Reg,Value,
+                           VDP[26]&63,VDP[27]&7))
+      if(Verbose) printf("MSX2+ BOOT: sprites-guia visuais desligados apos R25=00/R2=1F (colisoes preservadas)\n");
+  }
+}
+/* v1.06b: evento de colisao com posicao horizontal.
+ * No V9958 o bit 5 de S#0 sobe quando o feixe desenha o primeiro pixel
+ * sobreposto. A abertura MSX2+ faz uma leitura de S#0 (limpa) e depois
+ * espera em laco a PROXIMA colisao para trocar R#26/R#27 no meio da tela.
+ * Ate a v1.06 a colisao da linha corrente era religada logo apos a
+ * leitura que a limpava: a segunda espera saia na mesma linha da primeira
+ * e a troca da metade inferior acontecia cedo demais (metade inferior
+ * estatica). Agora cada linha dispara no maximo UM evento, no instante do
+ * pixel (fase HRefresh = 256 pixels em CPU_H256 ciclos) ou no HBlank. */
+static int  BootCollCachedLine=-1;   /* linha cujo X foi calculado     */
+static int  BootCollCachedX=-1;      /* X da 1a sobreposicao ou -1     */
+static int  BootCollFiredLine=-1;    /* linha cujo evento ja disparou  */
+static void MSXBootCollisionFrameStart(void)
+{
+  BootCollCachedLine=BootCollFiredLine=-1;
+}
+MSX_HOT static void MSXBootUpdateSpriteCollision(void)
+{
+  int Pos;
+  if(!MSXBootCollisionEligible()) return;
+  if(ScanLine>=(ScanLines212?212:192) || BootCollFiredLine==ScanLine) return;
+  if(BootCollCachedLine!=ScanLine)
+  {
+    BootCollCachedLine=ScanLine;
+    BootCollCachedX=MSXBootSpriteCollisionX(VRAM,(unsigned)VRAMPages*0x4000u,
+       (unsigned)(SprTab-VRAM),(unsigned)(SprGen-VRAM),
+       VDP[1],VDP[8],VScroll,(unsigned)ScanLine);
+  }
+  if(BootCollCachedX<0) return;
+  /* Bit HR=0: linha ainda sendo desenhada. Comparar a posicao do feixe. */
+  if(!(VDPStatus[2]&0x20))
+  {
+    Pos=CPU.IPeriod-CPU.ICount;
+    if(Pos<0) Pos=0;
+    Pos=Pos*256/CPU_H256;
+    if(Pos<BootCollCachedX) return;
+  }
+  VDPStatus[0]|=0x20;
+  BootCollFiredLine=ScanLine;
+}
+#endif
+
 /** InZ80() **************************************************/
 /** Z80 emulation calls this function to read a byte from   **/
 /** a given I/O port.                                       **/
 /*************************************************************/
-byte InZ80(word Port)
+MSX_HOT byte InZ80(word Port)
 {
   /* MSX only uses 256 IO ports */
   Port&=0xFF;
@@ -1619,8 +1860,8 @@ byte InZ80(word Port)
   {
 
 case 0x90: return(0xFD);                   /* Printer READY signal */
-case 0xF4: /* Panasonic MSX2+ reset-status, inverted (see openMSX). */
-  if(MODEL(MSX_MSX2P) && MSX2POpeningROM) return MSX2PResetF4;
+case 0xF4: /* MSX2+ reset-status (normal ou invertido, ver openMSX). */
+  if(MODEL(MSX_MSX2P)) return MSX2PResetF4;
   return NORAM;
 case 0xB5: return(RTCIn(RTCReg));          /* RTC registers        */
 
@@ -1671,6 +1912,12 @@ case 0x98: /* VRAM read port */
   return(Port);
 
 case 0x99: /* VDP status registers */
+#ifdef MSX_ESP32
+  /* A ROM de abertura le S#0 duas vezes em seguida. A colisao que ainda
+   * ocorre na linha atual precisa voltar a ficar visivel apos a limpeza
+   * do latch pela primeira leitura, como ocorre no V9958 real. */
+  if(VDP[15]==0) MSXBootUpdateSpriteCollision();
+#endif
   /* Read an appropriate status register */
   Port=VDPStatus[VDP[15]];
   /* Reset VAddr latch sequencer */
@@ -1764,7 +2011,7 @@ case 0xD4: /* FDC IRQ/DRQ */
 /** Z80 emulation calls this function to write byte V to a  **/
 /** given I/O port.                                         **/
 /*************************************************************/
-void OutZ80(word Port,byte Value)
+MSX_HOT void OutZ80(word Port,byte Value)
 {
   register byte I,J;
 
@@ -1775,8 +2022,10 @@ void OutZ80(word Port,byte Value)
 case 0x7C: WrCtrl2413(&OPLL,Value);return;        /* OPLL Register# */
 case 0x7D: WrData2413(&OPLL,Value);return;        /* OPLL Data      */
 case 0x91: Printer(Value);return;                 /* Printer Data   */
-case 0xF4: /* Panasonic: bit 7 writable, lower 7 read high. */
-  if(MODEL(MSX_MSX2P) && MSX2POpeningROM) MSX2PResetF4=Value|0x7F;
+case 0xF4: /* MSX2+ reset-status */
+  if(MODEL(MSX_MSX2P))
+    MSX2PResetF4=MSX2PF4Inverted? (byte)(Value|0x7F)
+                                : (byte)((MSX2PResetF4&0x20)|(Value&0xA0));
   return;
 case 0xA0: WrCtrl8910(&PSG,Value);return;         /* PSG Register#  */
 case 0xB4: RTCReg=Value&0x0F;return;              /* RTC Register#  */
@@ -1951,7 +2200,7 @@ case 0xFF: /* Mapper page at C000h */
     if(Verbose&0x08) printf("RAM-MAPPER: block %d at %Xh\n",Value,J*0x4000);
     I=J<<1;
     RAMMapper[J]      = Value;
-    MemMap[3][2][I]   = RAMData+((int)Value<<14);
+    MemMap[3][2][I]   = MSXRAMSeg(Value);
     MemMap[3][2][I+1] = MemMap[3][2][I]+0x2000;
     if((PSL[J]==3)&&(SSL[J]==2))
     {
@@ -1989,7 +2238,7 @@ unsigned msx_mapper_write_count(void) { return msx_mapper_writes_v28; }
 /** Switch ROM Mapper pages. This function is supposed to   **/
 /** be called when ROM page registers are written to.       **/
 /*************************************************************/
-static void MapROMCore(register word A,register byte V)
+MSX_HOT static void MapROMCore(register word A,register byte V)
 {
   byte I,J,PS,SS,*P;
 #ifdef MSX_ESP32
@@ -2311,7 +2560,7 @@ printf("(%04Xh) = %02Xh at PC=%04Xh\n",A,V,CPU.PC.W);
 }
 
 /* Reconcile once after a mapper transaction, not on every Z80 fetch. */
-void MapROM(register word A,register byte V)
+MSX_HOT void MapROM(register word A,register byte V)
 {
 #ifdef MSX_ESP32
   byte *R2=RAM[2],*R3=RAM[3],*R4=RAM[4],*R5=RAM[5];
@@ -2539,6 +2788,9 @@ void VDPOut(register byte R,register byte V)
 
   /* Write value into a register */
   VDP[R]=V;
+#ifdef MSX_ESP32
+  MSXBootObserveGuideRegisters(R,V);
+#endif
 }
 
 /** Printer() ************************************************/
@@ -2670,7 +2922,7 @@ void MSXBootKeyClickOnFirstInput(void)
 /** Refresh screen, check keyboard and sprites. Call this   **/
 /** function on each interrupt.                             **/
 /*************************************************************/
-word LoopZ80(Z80 *R)
+MSX_HOT word LoopZ80(Z80 *R)
 {
   static byte BFlag=0;
   static byte BCount=0;
@@ -2768,6 +3020,9 @@ word LoopZ80(Z80 *R)
       }
 #endif
 
+#ifdef MSX_ESP32
+      MSXBootCollisionFrameStart();
+#endif
       /* Drawing now... */
       Drawing=1;
 
@@ -2865,6 +3120,11 @@ word LoopZ80(Z80 *R)
   /* O TMS9918 do MSX1 nao possui a unidade de comandos V9938.
    * Evita a chamada de emulacao de comandos uma vez por scanline no MSX1. */
   if(!MODEL(MSX_MSX1)) LoopVDP();
+#ifdef MSX_ESP32
+  /* Sprite collisions at scanline rate, even on skipped video frames.
+   * Only affects the initial MSX2+ SCREEN 6 animation. */
+  MSXBootUpdateSpriteCollision();
+#endif
 
   /* Every few scanlines, update sound before the (possibly slow) blit. */
   if(!(ScanLine&0x07))
@@ -2936,7 +3196,17 @@ word LoopZ80(Z80 *R)
     VDPStatus[0]=(VDPStatus[0]&~0x40)|0x1F;
 
     /* Check sprites and set Collision bit */
+#ifdef MSX_ESP32
+    /* v1.06b: durante a abertura a colisao ja e sinalizada linha a linha,
+     * no instante correto. A verificacao do quadro inteiro na linha 192
+     * religaria o bit depois de a ROM te-lo limpado (falso sincronismo). */
+    if(!(VDPStatus[0]&0x20)&&!MSXBootCollisionEligible()&&CheckSprites()) VDPStatus[0]|=0x20;
+#else
     if(!(VDPStatus[0]&0x20)&&CheckSprites()) VDPStatus[0]|=0x20;
+#endif
+
+    /* v39: promocao limitada de bancos MegaROM para a DRAM. */
+    RomCachePromote();
 
     /* Count MIDI ticks */
     MIDITicks(1000*VPeriod/CPU_CLOCK);

@@ -105,7 +105,7 @@ unsigned int SaveState(unsigned char *Buf,unsigned int MaxSize)
   SaveSTRUCT(OPLL);
   SaveSTRUCT(SCChip);
   SaveARRAY(State);
-  SaveDATA(RAMData,RAMPages*0x4000);
+  for(J=0;J<RAMPages;++J) SaveDATA(MSXRAMSeg(J),0x4000);
   SaveDATA(VRAM,VRAMPages*0x4000);
 
   /* Return amount of data written */
@@ -134,7 +134,7 @@ unsigned int LoadState(unsigned char *Buf,unsigned int MaxSize)
   LoadSTRUCT(OPLL);
   LoadSTRUCT(SCChip);
   LoadARRAY(State);
-  LoadDATA(RAMData,RAMPages*0x4000);
+  for(J=0;J<RAMPages;++J) LoadDATA(MSXRAMSeg(J),0x4000);
   LoadDATA(VRAM,VRAMPages*0x4000);
 
   /* Parse hardware state */
@@ -187,7 +187,7 @@ unsigned int LoadState(unsigned char *Buf,unsigned int MaxSize)
     for(I=0;I<4;++I)
     {
       RAMMapper[I]       &= RAMMask;
-      MemMap[3][2][I*2]   = RAMData+RAMMapper[I]*0x4000;
+      MemMap[3][2][I*2]   = MSXRAMSeg(RAMMapper[I]);
       MemMap[3][2][I*2+1] = MemMap[3][2][I*2]+0x2000;
     }
 

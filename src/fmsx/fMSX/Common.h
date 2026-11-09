@@ -13,6 +13,12 @@
 /**     changes to this file.                               **/
 /*************************************************************/
 
+#undef MSX_HOT_V   /* Common.h e incluido uma vez por profundidade de cor */
+#if defined(MSX_ESP32) && defined(BPP8)
+#define MSX_HOT_V MSX_HOT
+#else
+#define MSX_HOT_V
+#endif
 static int FirstLine = 18;     /* First scanline in the XBuf */
 
 static void  Sprites(byte Y,pixel *Line);
@@ -168,7 +174,7 @@ INLINE pixel YJKColor(register int Y,register int J,register int K)
 /** the screen border. It returns a pointer to the start of **/
 /** scanline Y in XBuf or 0 if scanline is beyond XBuf.     **/
 /*************************************************************/
-pixel *RefreshBorder(register byte Y,register pixel C)
+MSX_HOT_V pixel *RefreshBorder(register byte Y,register pixel C)
 {
   register pixel *P;
   register int H;
@@ -181,6 +187,17 @@ pixel *RefreshBorder(register byte Y,register pixel C)
 
   /* Set up the transparent color */
   XPal[0]=(!BGColor||SolidColor0)? XPal0:XPal[BGColor];
+
+#if defined(MSX_ESP32) && defined(BPP8)
+  /* v1.06b: linha desenhada na RAM interna; o nucleo 1 copia para a PSRAM. */
+  if(MSXLineRingOn)
+  {
+    P=(pixel *)hal_lr_acquire((uint8_t *)XBuf+WIDTH*(FirstLine+Y));
+    for(H=(WIDTH-256)/2+HAdjust;H>0;H--) P[H-1]=C;
+    for(H=(WIDTH-256)/2-HAdjust;H>0;H--) P[WIDTH-H]=C;
+    return(P+(WIDTH-256)/2+HAdjust);
+  }
+#endif
 
   /* Start of the buffer */
   P=(pixel *)XBuf;
@@ -366,7 +383,7 @@ void Sprites(register byte Y,register pixel *Line)
 /** color sprites in SCREENs 4-8. The result is returned in **/
 /** ZBuf, whose size must be 320 bytes (32+256+32).         **/
 /*************************************************************/
-void ColorSprites(register byte Y,byte *ZBuf)
+MSX_HOT_V void ColorSprites(register byte Y,byte *ZBuf)
 {
   static const byte SprHeights[4] = { 8,16,16,32 };
   register byte C,IH,OH,J,OrThem;
@@ -848,7 +865,7 @@ void RefreshLine4(register byte Y)
 /** Refresh line Y (0..191/211) of SCREEN5, including       **/
 /** sprites in this line.                                   **/
 /*************************************************************/
-void RefreshLine5(register byte Y)
+MSX_HOT_V void RefreshLine5(register byte Y)
 {
   register pixel *P;
   register byte I,X,*T,*R;
@@ -1151,6 +1168,12 @@ void RefreshLine12(register byte Y)
 /** Refresh line Y (0..191/211) of SCREEN6, including       **/
 /** sprites in this line.                                   **/
 /*************************************************************/
+/* v1.06: no GRAPHIC 5 (SCREEN 6) cada ponto de sprite cobre dois pontos
+ * de hardware: o da esquerda usa a paleta (cor>>2) e o da direita (cor&3).
+ * A saida de 256 amostras mostra o ponto da esquerda, como ja acontece
+ * com o fundo (bits 7-6 e 3-2). Antes o fMSX usava XPal[cor] (0..15):
+ * sprites da abertura MSX2+ apareciam como barras brancas. */
+#define MSX_S6_SPR(C) XPal[(C)>>2]
 void RefreshLine6(register byte Y)
 {
   register pixel *P;
@@ -1164,6 +1187,38 @@ void RefreshLine6(register byte Y)
   else
   {
     ColorSprites(Y,ZBuf);
+#if defined(MSX_ESP32) && (defined(BPP8) || defined(BPP16))
+    /* Apos a sequencia final da abertura MSX2+, os sprites-guia de
+     * colisao nao sao compostos. Status/colisao continuam intactos. */
+    if(MSXBootGuidesShouldHide()) MSXSpriteLineEmpty=1;
+    /* V9958: rolagem horizontal R#26/R#27, SP2 e MSK (abertura MSX2+ e
+     * qualquer software MSX2+ em SCREEN 6). Sem rolagem e sem mascara o
+     * caminho original, mais rapido, e usado sem nenhum custo extra. */
+    if(MSXScreen6HScrollEnabled && MODEL(MSX_MSX2P) &&
+       ((VDP[26]&0x3F) || (VDP[27]&7) || MaskEdges))
+    {
+      const unsigned char *video_vram=VRAM;
+      const unsigned vram_size=(unsigned)VRAMPages*0x4000u;
+      const unsigned row_base=(unsigned)(ChrTab-VRAM) +
+                   (((unsigned)(Y+VScroll)<<7)&ChrTabM&0x7FFF);
+      const unsigned r26=VDP[26];
+      const unsigned r27=VDP[27];
+      const unsigned two_pages=HScroll512!=0;
+      const pixel backdrop=XPal[BGColor&3];
+      const byte *S=ZBuf+32;
+      for(unsigned x=0; x<256; ++x)
+      {
+        const unsigned bg=MSXV9958Screen6Sample(video_vram,vram_size,
+                                  row_base,r26,r27,two_pages,x);
+        pixel c=(bg==MSX_V9958_S6_BACKDROP)? backdrop:XPal[bg];
+        if(!MSXSpriteLineEmpty && S[x]) c=MSX_S6_SPR(S[x]);
+        P[x]=c;
+      }
+      /* MSK cobre os 8 pontos da esquerda inclusive sprites. */
+      if(MaskEdges) for(unsigned x=0;x<8;++x) P[x]=backdrop;
+      return;
+    }
+#endif
     if(MSXSpriteLineEmpty)
     {
       // SCREEN6: duas amostras visiveis de cada byte (512 -> 256).
@@ -1210,18 +1265,19 @@ void RefreshLine6(register byte Y)
         continue;
       }
 #endif
-      C=R[0];P[0]=XPal[C? C:T[0]>>6];
-      C=R[1];P[1]=XPal[C? C:(T[0]>>2)&0x03];
-      C=R[2];P[2]=XPal[C? C:T[1]>>6];
-      C=R[3];P[3]=XPal[C? C:(T[1]>>2)&0x03];
-      C=R[4];P[4]=XPal[C? C:T[2]>>6];
-      C=R[5];P[5]=XPal[C? C:(T[2]>>2)&0x03];
-      C=R[6];P[6]=XPal[C? C:T[3]>>6];
-      C=R[7];P[7]=XPal[C? C:(T[3]>>2)&0x03];
+      C=R[0];P[0]=C? MSX_S6_SPR(C):XPal[T[0]>>6];
+      C=R[1];P[1]=C? MSX_S6_SPR(C):XPal[(T[0]>>2)&0x03];
+      C=R[2];P[2]=C? MSX_S6_SPR(C):XPal[T[1]>>6];
+      C=R[3];P[3]=C? MSX_S6_SPR(C):XPal[(T[1]>>2)&0x03];
+      C=R[4];P[4]=C? MSX_S6_SPR(C):XPal[T[2]>>6];
+      C=R[5];P[5]=C? MSX_S6_SPR(C):XPal[(T[2]>>2)&0x03];
+      C=R[6];P[6]=C? MSX_S6_SPR(C):XPal[T[3]>>6];
+      C=R[7];P[7]=C? MSX_S6_SPR(C):XPal[(T[3]>>2)&0x03];
       R+=8;P+=8;T+=4;
     }
   }
 }
+#undef MSX_S6_SPR
   
 /** RefreshLine7() *******************************************/
 /** Refresh line Y (0..191/211) of SCREEN7, including       **/

@@ -33,6 +33,16 @@
 
 int fmsx_main(int argc, char *argv[]);
 
+// v1.08: funcoes quentes do emulador na IRAM (executam sem passar pelo cache
+// de flash, que e compartilhado com os acessos a PSRAM). Tamanho validado no
+// link; -DMSX_HOT_IRAM=0 desliga caso outro conjunto de bibliotecas estoure a IRAM.
+#if defined(MSX_ESP32) && defined(MSX_HOT_IRAM) && MSX_HOT_IRAM
+#include "esp_attr.h"
+#define MSX_HOT IRAM_ATTR
+#else
+#define MSX_HOT
+#endif
+
 #ifdef MSX_ESP32
 /**
  * O ESP32 não tem diretório de trabalho (cwd), e o fMSX depende dele. Estas funções

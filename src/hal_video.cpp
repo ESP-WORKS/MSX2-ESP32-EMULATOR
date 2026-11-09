@@ -190,7 +190,20 @@ extern "C" void hal_video_toggle_stretch(void) { stretch = !stretch; }
 static unsigned emulation_hz = 60;
 // O primeiro ajuste (inclusive NTSC=60) deve zerar a cadencia do boot.
 static bool system_hz_initialized = false;
-static int64_t pace_deadline_us = 0;
+/* v1.08: prazo de quadro EXATO de 60,000 Hz (NTSC) e 50,000 Hz (PAL), em
+ * nanossegundos. O OSD (F11) conta quadros por segundo de relogio: com o
+ * periodo real do MSX (59,92 Hz) ele alternava 59/60 mesmo com folga de CPU.
+ * A diferenca de 0,13% entre o relogio do MSX e este prazo e absorvida pelo
+ * servo de taxa do audio (msx_glue.c), de modo que a fila de audio nunca
+ * passa a limitar o emulador abaixo de 60 EPS. */
+#define MSX_PACE_NTSC_NS 16666667LL
+#define MSX_PACE_PAL_NS  20000000LL
+/* Divida maxima tolerada antes de reancorar: um quadro pesado isolado
+ * (troca de cena, comando VDP longo) e compensado pelos seguintes, sem
+ * perder EPS. A fila VGA de 2 buffers apresenta os quadros recuperados. */
+#define MSX_PACE_MAX_DEBT_FRAMES 4
+static int64_t pace_period_ns = MSX_PACE_NTSC_NS;
+static int64_t pace_deadline_ns = 0;
 static unsigned pace_previous_rate = 0;
 static void reset_fps_measurement(void);
 extern "C" void msx_frameskip_on_timing_reset(void);
@@ -206,7 +219,8 @@ extern "C" void hal_video_set_system_hz(unsigned hz)
      * Antes havia retorno antecipado que conservava a janela anterior. */
     system_hz_initialized = true;
     emulation_hz = (hz == 60 ? 60u : 50u);
-    pace_deadline_us = 0;
+    pace_period_ns = hz == 60 ? MSX_PACE_NTSC_NS : MSX_PACE_PAL_NS;
+    pace_deadline_ns = 0;
     pace_previous_rate = 0;
     // Ao trocar a regiao/modelo, recalcular AUTO sem aproveitar o skip anterior.
     msx_frameskip_on_timing_reset();
@@ -231,31 +245,32 @@ extern "C" void hal_video_set_system_hz(unsigned hz)
 extern "C" void hal_video_pace_emu_frame(void)
 {
     const unsigned max_eps = emulation_hz;
-    const int64_t period_us = 1000000LL / (int64_t)max_eps;
-    int64_t now = hal_time_us();
+    const int64_t period_ns = pace_period_ns;
+    int64_t now_ns = hal_time_us() * 1000LL;
 
-    if (pace_previous_rate != max_eps || pace_deadline_us == 0) {
+    if (pace_previous_rate != max_eps || pace_deadline_ns == 0) {
         pace_previous_rate = max_eps;
-        pace_deadline_us = now + period_us;
+        pace_deadline_ns = now_ns + period_ns;
         return;
     }
 
-    if (now < pace_deadline_us) {
+    if (now_ns < pace_deadline_ns) {
         // Cede o núcleo durante a maior parte da espera e usa espera curta apenas
         // no final para evitar um overshoot de vários milissegundos.
-        while (pace_deadline_us - now > 2000) {
-            int ms = (int)((pace_deadline_us - now - 1000) / 1000);
+        while (pace_deadline_ns - now_ns > 2000000LL) {
+            int ms = (int)((pace_deadline_ns - now_ns - 1000000LL) / 1000000LL);
             if (ms > 0) hal_delay_ms(ms);
-            now = hal_time_us();
+            now_ns = hal_time_us() * 1000LL;
         }
-        if (now < pace_deadline_us)
-            delayMicroseconds((uint32_t)(pace_deadline_us - now));
-        pace_deadline_us += period_us;
-    } else if (now - pace_deadline_us > period_us) {
-        // Um quadro já excedeu o orçamento: reancora a cadência, sem catch-up.
-        pace_deadline_us = now + period_us;
+        if (now_ns < pace_deadline_ns)
+            delayMicroseconds((uint32_t)((pace_deadline_ns - now_ns) / 1000LL));
+        pace_deadline_ns += period_ns;
+    } else if (now_ns - pace_deadline_ns > MSX_PACE_MAX_DEBT_FRAMES * period_ns) {
+        // Atraso longo (menu, carga de arquivo, CPU saturada): reancora, sem rajada.
+        pace_deadline_ns = now_ns + period_ns;
     } else {
-        pace_deadline_us += period_us;
+        // Atraso curto: o proximo quadro roda sem espera e recupera o tempo.
+        pace_deadline_ns += period_ns;
     }
 }
 

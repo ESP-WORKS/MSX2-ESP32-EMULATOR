@@ -539,6 +539,22 @@ extern int TMSPaletteVariant; /* 0: RGB antigo, 1: TMS9918 analogico */
 #ifdef MSX_ESP32
 /* v34: cache LRU associativo MegaROM, configurado antes de StartMSX. */
 void MSXSetRomCacheKiB(int KiB);
+/* Porta F4h do MSX2+: -1 auto, 0 logica normal, 1 invertida (Panasonic). */
+void MSXSetF4Mode(int Mode);
+void MSXColdResetStatus(void);  /* v1.06: F12 com abertura MSX2+ */
+void MSXSetHotRAM(int Enabled);   /* v1.06b: segmentos 0/1 na RAM interna */
+byte *MSXRAMSeg(int Seg);         /* endereco do segmento do mapper    */
+/* v1.04: hardware scroll in V9958 SCREEN6; defaults ON, reversible. */
+/* v1.05: hide residual boot-only sprite guides AFTER the ROM's own end markers.
+ * Does not modify the status/collision engine. Enabled by default. */
+void MSXSetBootGuideCleanup(int Enabled);
+int  MSXBootGuidesShouldHide(void);
+
+extern int MSXScreen6HScrollEnabled;
+void MSXSetScreen6HScroll(int Enabled);
+
+/* v1.03: collision timing for original MSX2+ opening, opt-out via bootl.rc. */
+void MSXSetBootSpriteScanline(int Enabled);
 void MSXRomCacheStats(unsigned *Hits,unsigned *Misses,unsigned *Copies,
                       unsigned *Evictions,unsigned *Pages);
 #endif

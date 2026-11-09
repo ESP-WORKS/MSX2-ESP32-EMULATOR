@@ -81,7 +81,7 @@ void MenuMSX(void)
     int selected=1;
     for(I=1;I<sizeof(actions)/sizeof(actions[0]);++I)
       if(actions[I]==J) selected=I;
-    sprintf(S,"MSX2+ FAST - F10\nOpen file\nSave state\nHardware model\nInput devices\nCartridge slots\nDisk drives\nCheats\nSearch cheats\nFixed font        %c\nAll sprites       %c\nPatch DiskROM     %c\nSCC/SCC+ audio    %c\nLayout Teclado BR %c\nRewind tape\nReset emulator\nReboot\nResume game\n",
+    sprintf(S,"MSX2+ FAST - F10\nOpen file\nSave state\nHardware model\nInput devices\nCartridge slots\nDisk drives\nCheats\nSearch cheats\nFixed font        %c\nAll sprites       %c\nPatch DiskROM     %c\nSCC/SCC+ audio    %c\nLayout Keyboard BR %c\nRewind tape\nReset emulator\nReboot\nResume game\n",
       OPTION(MSX_FIXEDFONT)?CON_CHECK:' ',OPTION(MSX_ALLSPRITE)?CON_CHECK:' ',OPTION(MSX_PATCHBDOS)?CON_CHECK:' ',SCCEnabled?CON_CHECK:' ',MSXKeyboardBR?CON_CHECK:' ');
     for(I=0;S[I];++I) if(S[I]=='\n') S[I]=0;
     selected=CONMenu(-1,-1,-1,-1,CLR_TEXT,CLR_BACK,S,selected);
@@ -706,9 +706,9 @@ void MenuMSX(void)
       case 24: /* SCC/SCC+ sound, default OFF */
         SetSCCEnabled(!SCCEnabled);
         break;
-      case 25: /* Teclado brasileiro ABNT2 - default OFF. */
+      case 25: /* Teclado brasileiro ABNT2 - default ON. */
         MSXKeyboardBR = !MSXKeyboardBR;
-        printf("Layout Teclado BR: %s\n", MSXKeyboardBR ? "ON" : "OFF");
+        printf("Layout Keyboard BR: %s\n", MSXKeyboardBR ? "ON" : "OFF");
         break;
 #endif
       case 19: /* Rewind */

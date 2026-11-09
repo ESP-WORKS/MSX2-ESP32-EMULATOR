@@ -14,6 +14,7 @@
 #ifndef COMMONMUX_H
 #define COMMONMUX_H
 
+#include "MSXV9958Screen6Scroll.h"
 #include "Common.h"
 #include "Wide.h"
 
